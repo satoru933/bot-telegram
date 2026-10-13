@@ -1,3 +1,7 @@
+import os
+import re
+from threading import Thread
+from flask import Flask
 import logging
 from telegram import Update, ChatPermissions
 from telegram.ext import (
@@ -8,166 +12,117 @@ from telegram.ext import (
     filters
 )
 
+# 1. Servidor web diminuto para mantenerlo gratis en Render
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "¡Bot de Moderación activo 24/7!"
+
+def run_web():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
+
+# 2. Tu Token integrado
 TOKEN = "8709897192:AAewR7otKiHb3DAa1jRxesJpOxvoKGTCKc"
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# Palabras prohibidas (puedes agregar más separadas por coma)
+PALABRAS_PROHIBIDAS = ["spam", "casino", "cripto", "estafa"]
 
-GRUPO_STAFF = {}
-ADVERTENCIAS = {}
-REGLAS = {}
-EXTRAS = {}
-FILTROS_PRO = {}
+# --- FUNCIONES DE MODERACIÓN TIPO GROUP HELP ---
 
-async def setstaffgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.bot_data["staff_chat_id"] = update.effective_chat.id
-    await update.message.reply_text("✅ ¡Este grupo ha sido configurado como el Grupo del Staff!")
+# Mensaje de Bienvenida
+async def bienvenida(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        await update.message.reply_text(
+            f"¡Hola {member.mention_html()}! 👋 Bienvenido/a al grupo. Por favor lee las reglas.",
+            parse_mode="HTML"
+        )
 
-async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Responde al mensaje que deseas reportar con /report.")
+# Moderación de Mensajes (Links y Malas Palabras)
+async def moderar_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text or ""
+    user = update.message.from_user
+    chat_id = update.message.chat_id
+
+    # Verificar si el usuario es administrador (los admins no sufren moderación)
+    member = await context.bot.get_chat_member(chat_id, user.id)
+    if member.status in ['administrator', 'creator']:
         return
-    staff_id = context.bot_data.get("staff_chat_id")
-    if not staff_id:
-        await update.message.reply_text("❌ No hay un Grupo de Staff vinculado.")
-        return
-    msg = update.message.reply_to_message
-    await context.bot.send_message(
-        chat_id=staff_id,
-        text=f"🚨 **REPORTE**\n👤 De: {update.effective_user.first_name}\n💬 {msg.text}\n🔗 {msg.link}",
-        parse_mode="Markdown"
-    )
-    await update.message.reply_text("📲 Reporte enviado al staff.")
 
-async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Responde al mensaje del usuario que deseas banear.")
-        return
-    try:
-        await context.bot.ban_chat_member(chat_id=update.effective_chat.id, user_id=update.message.reply_to_message.from_user.id)
-        await update.message.reply_text("⛔ Usuario baneado con éxito.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+    # 1. Eliminar Enlaces (Anti-link)
+    if "http://" in texto or "https://" in texto or "t.me/" in texto:
+        try:
+            await update.message.delete()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ {user.mention_html()}, no se permiten enlaces en este grupo.",
+                parse_mode="HTML"
+            )
+            return
+        except Exception as e:
+            print(f"Error al borrar mensaje: {e}")
 
-async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ Uso: /unban [ID]")
-        return
-    await context.bot.unban_chat_member(chat_id=update.effective_chat.id, user_id=int(context.args[0]))
-    await update.message.reply_text("✅ Usuario desbaneado.")
-
-async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Responde al usuario a silenciar.")
-        return
-    await context.bot.restrict_chat_member(
-        chat_id=update.effective_chat.id,
-        user_id=update.message.reply_to_message.from_user.id,
-        permissions=ChatPermissions(can_send_messages=False)
-    )
-    await update.message.reply_text("🔇 Usuario silenciado.")
-
-async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Responde al usuario.")
-        return
-    await context.bot.restrict_chat_member(
-        chat_id=update.effective_chat.id,
-        user_id=update.message.reply_to_message.from_user.id,
-        permissions=ChatPermissions(can_send_messages=True, can_send_other_messages=True, can_add_web_page_previews=True)
-    )
-    await update.message.reply_text("🔊 Usuario desmuteado.")
-
-async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Responde al usuario a advertir.")
-        return
-    chat_id = update.effective_chat.id
-    user_id = update.message.reply_to_message.from_user.id
-    if chat_id not in ADVERTENCIAS:
-        ADVERTENCIAS[chat_id] = {}
-    ADVERTENCIAS[chat_id][user_id] = ADVERTENCIAS[chat_id].get(user_id, 0) + 1
-    total = ADVERTENCIAS[chat_id][user_id]
-    if total >= 3:
-        await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-        ADVERTENCIAS[chat_id][user_id] = 0
-        await update.message.reply_text(f"⚠️ Acumuló 3 advertencias y fue baneado.")
-    else:
-        await update.message.reply_text(f"⚠️ Advertencia ({total}/3).")
-
-async def del_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message:
-        await update.message.reply_to_message.delete()
-        await update.message.delete()
-
-async def pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message:
-        await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=update.message.reply_to_message.message_id)
-        await update.message.reply_text("📌 Mensaje anclado.")
-
-async def setrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = " ".join(context.args)
-    if not texto:
-        await update.message.reply_text("⚠️ Uso: /setrules [Texto]")
-        return
-    REGLAS[update.effective_chat.id] = texto
-    await update.message.reply_text("✅ Reglas guardadas.")
-
-async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = REGLAS.get(update.effective_chat.id, "No hay reglas definidas.")
-    await update.message.reply_text(f"📋 **REGLAS:**\n\n{texto}", parse_mode="Markdown")
-
-async def extra(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("⚠️ Uso: /extra palabra respuesta")
-        return
-    chat_id = update.effective_chat.id
-    if chat_id not in EXTRAS:
-        EXTRAS[chat_id] = {}
-    EXTRAS[chat_id][context.args[0].lower()] = " ".join(context.args[1:])
-    await update.message.reply_text("✅ Auto-respuesta creada.")
-
-async def setantispam(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ [PRO] Uso: /setantispam palabra1 palabra2")
-        return
-    FILTROS_PRO[update.effective_chat.id] = context.args
-    await update.message.reply_text("💎 [PRO] Filtro anti-spam activado.")
-
-async def gestor_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    texto = update.message.text.lower() if update.message.text else ""
-    if chat_id in FILTROS_PRO:
-        for p in FILTROS_PRO[chat_id]:
-            if p in texto:
+    # 2. Eliminar Palabras Prohibidas
+    for palabra in PALABRAS_PROHIBIDAS:
+        if re.search(rf"\b{palabra}\b", texto, re.IGNORECASE):
+            try:
                 await update.message.delete()
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ {user.mention_html()}, tu mensaje contenía contenido no permitido.",
+                    parse_mode="HTML"
+                )
                 return
-    if chat_id in EXTRAS:
-        for p, r in EXTRAS[chat_id].items():
-            if p in texto:
-                await update.message.reply_text(r)
-                break
+            except Exception as e:
+                print(f"Error al borrar mensaje: {e}")
 
+# Comando /ban
+async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Responde al mensaje del usuario que deseas banear.")
+        return
+    user_to_ban = update.message.reply_to_message.from_user
+    await context.bot.ban_chat_member(update.message.chat_id, user_to_ban.id)
+    await update.message.reply_text(f"🚫 {user_to_ban.mention_html()} ha sido baneado.", parse_mode="HTML")
+
+# Comando /mute (Silenciar)
+async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Responde al mensaje del usuario que deseas silenciar.")
+        return
+    user_to_mute = update.message.reply_to_message.from_user
+    permissions = ChatPermissions(can_send_messages=False)
+    await context.bot.restrict_chat_member(update.message.chat_id, user_to_mute.id, permissions=permissions)
+    await update.message.reply_text(f"🤐 {user_to_mute.mention_html()} ha sido silenciado.", parse_mode="HTML")
+
+# Comando /unmute (Desmutear)
+async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Responde al mensaje del usuario que deseas desmutear.")
+        return
+    user_to_unmute = update.message.reply_to_message.from_user
+    permissions = ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True)
+    await context.bot.restrict_chat_member(update.message.chat_id, user_to_unmute.id, permissions=permissions)
+    await update.message.reply_text(f"🔊 {user_to_unmute.mention_html()} ya puede hablar de nuevo.", parse_mode="HTML")
+
+# --- INICIO DEL BOT ---
 def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("setstaffgroup", setstaffgroup))
-    app.add_handler(CommandHandler("report", report))
-    app.add_handler(CommandHandler("ban", ban))
-    app.add_handler(CommandHandler("unban", unban))
-    app.add_handler(CommandHandler("mute", mute))
-    app.add_handler(CommandHandler("unmute", unmute))
-    app.add_handler(CommandHandler("warn", warn))
-    app.add_handler(CommandHandler("del", del_msg))
-    app.add_handler(CommandHandler("pin", pin))
-    app.add_handler(CommandHandler("setrules", setrules))
-    app.add_handler(CommandHandler("rules", rules))
-    app.add_handler(CommandHandler("extra", extra))
-    app.add_handler(CommandHandler("setantispam", setantispam))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, gestor_mensajes))
-    print("Bot activo...")
-    app.run_polling()
+    application = Application.builder().token(TOKEN).build()
 
-if __name__ == "__main__":
+    # Handlers
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bienvenida))
+    application.add_handler(CommandHandler("ban", ban_user))
+    application.add_handler(CommandHandler("mute", mute_user))
+    application.add_handler(CommandHandler("unmute", unmute_user))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderar_mensajes))
+
+    application.run_polling()
+
+if __name__ == '__main__':
+    keep_alive()
     main()
